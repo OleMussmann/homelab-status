@@ -70,7 +70,8 @@ func run(configPath string, logger *slog.Logger) error {
 	}
 
 	// Context for graceful shutdown.
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// Incus sends SIGPWR or SIGRTMIN+3 (37) to PID 1 to stop system containers.
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGPWR, syscall.Signal(37))
 	defer cancel()
 
 	// Start scheduler in background.
