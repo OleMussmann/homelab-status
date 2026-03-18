@@ -199,6 +199,7 @@
         icon: nextcloud
         href: https://nx22196.your-storageshare.de/
         siteMonitor: https://nx22196.your-storageshare.de/
+        statusStyle: "dot"
         widget:
           type: nextcloud
           url: https://nx22196.your-storageshare.de/
@@ -208,6 +209,7 @@
         icon: home-assistant
         href: https://ha.ole.mn
         siteMonitor: https://ha.ole.mn
+        statusStyle: "dot"
         widget:
           type: homeassistant
           url: https://ha.ole.mn
@@ -217,4 +219,5 @@
     - Dashboard API:
         icon: mdi-api
         siteMonitor: http://dashboard-api:8080/healthz
+        statusStyle: "dot"
         description: Backend health
