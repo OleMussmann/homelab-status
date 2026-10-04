@@ -1,12 +1,12 @@
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.services.dashboard-agent;
+  cfg = config.services.homelab-status-agent;
   exporterCfg = config.services.prometheus.exporters.node;
 in
 {
-  options.services.dashboard-agent = {
-    enable = lib.mkEnableOption "dashboard monitoring agent";
+  options.services.homelab-status-agent = {
+    enable = lib.mkEnableOption "homelab-status monitoring agent";
 
     basicAuthPasswordFile = lib.mkOption {
       type = lib.types.path;
@@ -92,7 +92,7 @@ in
         ];
 
       # SMART health textfile script.
-      systemd.services.dashboard-smart-check = lib.mkIf cfg.customChecks.smart {
+      systemd.services.homelab-status-smart-check = lib.mkIf cfg.customChecks.smart {
         description = "Dump SMART health to node-exporter textfile";
         serviceConfig = {
           Type = "oneshot";
@@ -118,7 +118,7 @@ in
         };
       };
 
-      systemd.timers.dashboard-smart-check = lib.mkIf cfg.customChecks.smart {
+      systemd.timers.homelab-status-smart-check = lib.mkIf cfg.customChecks.smart {
         wantedBy = [ "timers.target" ];
         timerConfig = {
           OnBootSec = "2min";
@@ -127,7 +127,7 @@ in
       };
 
       # NixOS generation + reboot-required textfile script.
-      systemd.services.dashboard-nixos-info = {
+      systemd.services.homelab-status-nixos-info = {
         description = "Dump NixOS generation info to node-exporter textfile";
         serviceConfig = {
           Type = "oneshot";
@@ -152,7 +152,7 @@ in
         };
       };
 
-      systemd.timers.dashboard-nixos-info = {
+      systemd.timers.homelab-status-nixos-info = {
         wantedBy = [ "timers.target" ];
         timerConfig = {
           OnBootSec = "1min";
@@ -164,7 +164,7 @@ in
     # Borg backup status textfile scripts (one per configured job).
     {
       systemd.services = (lib.listToAttrs (map (job: {
-        name = "dashboard-borg-${job}";
+        name = "homelab-status-borg-${job}";
         value = {
           description = "Dump Borg backup status for job ${job} to node-exporter textfile";
           # Run after the borg backup service if it exists, and share its
@@ -191,7 +191,7 @@ in
           };
         };
       }) cfg.customChecks.borgJobs)) // (lib.listToAttrs (map (user: {
-        name = "dashboard-pika-${user}";
+        name = "homelab-status-pika-${user}";
         value = {
           description = "Dump Pika Backup status for user ${user} to node-exporter textfile";
           serviceConfig = {
@@ -229,7 +229,7 @@ in
       }) cfg.customChecks.pikaBackupUsers));
 
       systemd.timers = (lib.listToAttrs (map (job: {
-        name = "dashboard-borg-${job}";
+        name = "homelab-status-borg-${job}";
         value = {
           wantedBy = [ "timers.target" ];
           timerConfig = {
@@ -238,7 +238,7 @@ in
           };
         };
       }) cfg.customChecks.borgJobs)) // (lib.listToAttrs (map (user: {
-        name = "dashboard-pika-${user}";
+        name = "homelab-status-pika-${user}";
         value = {
           description = "Timer for Pika Backup status check for user ${user}";
           wantedBy = [ "timers.target" ];
