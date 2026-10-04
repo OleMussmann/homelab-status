@@ -2,6 +2,7 @@
 
 let
   cfg = config.services.dashboard-agent;
+  exporterCfg = config.services.prometheus.exporters.node;
 in
 {
   options.services.dashboard-agent = {
@@ -62,6 +63,9 @@ in
         ];
         extraFlags = [
           "--collector.textfile.directory=${cfg.textfileDir}"
+          # Without this flag the generated web config below is never read
+          # and node-exporter serves metrics unauthenticated.
+          "--web.config.file=/run/prometheus-node-exporter/web-config.yml"
           # Note: tune --collector.systemd.unit-include later to limit scope.
         ];
       };
@@ -77,6 +81,9 @@ in
           script = pkgs.writeShellScript "gen-node-exporter-auth" ''
             PASS=$(cat ${cfg.basicAuthPasswordFile})
             ${pkgs.gnused}/bin/sed "s|PLACEHOLDER|$PASS|" ${webConfigFile} > /run/prometheus-node-exporter/web-config.yml
+            # This runs as root, but node-exporter must be able to read the file.
+            ${pkgs.coreutils}/bin/chown ${exporterCfg.user}:${exporterCfg.group} /run/prometheus-node-exporter/web-config.yml
+            ${pkgs.coreutils}/bin/chmod 0400 /run/prometheus-node-exporter/web-config.yml
           '';
         in
         [
