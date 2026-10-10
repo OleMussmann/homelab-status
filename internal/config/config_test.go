@@ -45,3 +45,39 @@ func TestListenAddrMissingFile(t *testing.T) {
 		t.Error("expected an error for a missing config file")
 	}
 }
+
+const minimalNixOS = "[[nixos]]\nhostname = \"x\"\nurl = \"http://x:9100/metrics\"\n"
+
+func TestLoadIgnoresRetiredAlertingSection(t *testing.T) {
+	body := "[alerting]\nenabled = true\nntfy_url = \"https://ntfy.sh/t\"\n\n[alerting.rules]\noom_kill = true\n\n" + minimalNixOS
+	if _, err := Load(writeConfig(t, body)); err != nil {
+		t.Fatalf("a config with a leftover [alerting] section must still load: %v", err)
+	}
+}
+
+func TestLoadHeartbeatURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{"unset", "", false},
+		{"https", "https://hc-ping.com/uuid", false},
+		{"not a url", "hc-ping.com/uuid", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := minimalNixOS
+			if tt.url != "" {
+				body = "[heartbeat]\nurl = \"" + tt.url + "\"\n\n" + body
+			}
+			cfg, err := Load(writeConfig(t, body))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && cfg.Heartbeat.URL != tt.url {
+				t.Errorf("got %q, want %q", cfg.Heartbeat.URL, tt.url)
+			}
+		})
+	}
+}

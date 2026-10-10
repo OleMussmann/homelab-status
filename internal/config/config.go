@@ -11,10 +11,10 @@ import (
 
 // Config is the top-level configuration.
 type Config struct {
-	Server   ServerConfig   `toml:"server"`
-	Incus    IncusConfig    `toml:"incus"`
-	Alerting AlertingConfig `toml:"alerting"`
-	NixOS    []NixOSConfig  `toml:"nixos"`
+	Server    ServerConfig    `toml:"server"`
+	Incus     IncusConfig     `toml:"incus"`
+	Heartbeat HeartbeatConfig `toml:"heartbeat"`
+	NixOS     []NixOSConfig   `toml:"nixos"`
 }
 
 // ServerConfig controls the HTTP listener and global poll interval.
@@ -30,22 +30,11 @@ type IncusConfig struct {
 	KeyFile  string `toml:"key_file"`
 }
 
-// AlertingConfig controls ntfy.sh push notifications.
-type AlertingConfig struct {
-	Enabled         bool          `toml:"enabled"`
-	NtfyURL         string        `toml:"ntfy_url"`
-	CooldownMinutes int           `toml:"cooldown_minutes"`
-	Rules           AlertingRules `toml:"rules"`
-}
-
-// AlertingRules defines which conditions trigger alerts.
-type AlertingRules struct {
-	MachineOffline       bool `toml:"machine_offline"`
-	SMARTFailure         bool `toml:"smart_failure"`
-	OOMKill              bool `toml:"oom_kill"`
-	HighDiskUsagePercent int  `toml:"high_disk_usage_percent"`
-	FailedServices       bool `toml:"failed_services"`
-	BorgStaleHours       int  `toml:"borg_stale_hours"`
+// HeartbeatConfig names a dead-man's-switch endpoint (healthchecks.io or
+// compatible) that is pinged after each poll cycle that reached a target.
+// The URL is a credential: whoever has it can ping the check.
+type HeartbeatConfig struct {
+	URL string `toml:"url"`
 }
 
 // NixOSConfig describes a single monitored NixOS machine.
@@ -76,9 +65,6 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.PollIntervalMinutes <= 0 {
 		cfg.Server.PollIntervalMinutes = 5
-	}
-	if cfg.Alerting.CooldownMinutes <= 0 {
-		cfg.Alerting.CooldownMinutes = 15
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -132,8 +118,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("nixos[%d] (%s): url is required", i, n.Hostname)
 		}
 	}
-	if c.Alerting.Enabled && c.Alerting.NtfyURL == "" {
-		return fmt.Errorf("alerting.ntfy_url is required when alerting is enabled")
+	if u := c.Heartbeat.URL; u != "" && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+		return fmt.Errorf("heartbeat.url must be an http(s) URL")
 	}
 	return nil
 }

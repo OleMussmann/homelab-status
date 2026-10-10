@@ -11,24 +11,15 @@ url = "https://incus-host.tailnet-name.ts.net:8443"
 cert_file = "/secrets/metrics.crt"
 key_file = "/secrets/metrics.key"
 
-[alerting]
-enabled = true
-ntfy_url = "https://ntfy.sh/your-dashboard-topic"
-cooldown_minutes = 15              # Min time between alerts for same host/event
-
-[alerting.rules]
-machine_offline = true             # Critical machine transitions to "offline"
-smart_failure = true               # SMART reports unhealthy disk
-oom_kill = true                    # OOM kill detected (delta > 0 between polls)
-high_disk_usage_percent = 90       # Disk usage exceeds threshold (0 = disabled)
-failed_services = true             # Any systemd unit in failed state
-borg_stale_hours = 48              # Borg backup older than threshold (0 = disabled)
+# Optional dead-man's switch. When set, the URL is requested after every poll
+# cycle in which at least one target answered; a service such as
+# healthchecks.io alerts when the pings stop. The URL is a credential.
+# [heartbeat]
+# url = "https://hc-ping.com/your-check-uuid"
 
 # Add one [[nixos]] block per monitored NixOS machine.
-# Machines with critical = true will trigger offline alerts.
-# Machines with critical = false (laptops, desktops) are still monitored
-# and displayed, but going offline will not fire a notification.
-# Hardware/service alerts (SMART, OOM, failed units) fire for all machines.
+# `critical` is passed through in the status JSON: true for always-on
+# machines, false for laptops and desktops that are expected to be offline.
 
 [[nixos]]
 hostname = "server-01"
@@ -44,7 +35,7 @@ username = "metrics"
 password_file = "/secrets/node-exporter-pass"
 critical = true
 
-# Example non-critical machine (no offline alerts):
+# Example non-critical machine:
 # [[nixos]]
 # hostname = "laptop"
 # url = "http://laptop.tailnet-name.ts.net:9100/metrics"

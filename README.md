@@ -30,11 +30,11 @@ Tailscale.
 
 Follow these steps in order when setting up the project from scratch.
 
-### 1. Create an ntfy.sh topic
+### 1. (Optional) Create a heartbeat check
 
-Go to <https://ntfy.sh> and pick a private topic name (e.g.,
-`homelab-dashboard-alerts`). Note the full URL
-(`https://ntfy.sh/your-topic-name`) -- you will need it for `config.toml`.
+Create a check at <https://healthchecks.io> (or a compatible service) with
+a period equal to the poll interval. Note its ping URL -- it goes into
+`[heartbeat] url` in `config.toml`. See [Heartbeat](#heartbeat).
 
 ### 2. Switch to the IncusOS remote and create storage volumes
 
@@ -167,11 +167,11 @@ cp config.example.toml config.toml
 Fill in:
 - Your actual Tailscale hostnames (e.g., `server-01.tailnet-name.ts.net`)
 - The Incus host URL
-- The ntfy.sh topic URL from step 1
+- The heartbeat ping URL from step 1, if you created one
 - Paths to the TLS cert/key from step 3 (inside the container these are
   `/secrets/metrics.crt` and `/secrets/metrics.key`)
 - Path to the node-exporter password file (`/secrets/node-exporter-pass`)
-- Set `critical = true/false` for each machine
+- Set `critical = true/false` for each machine (reported in the status JSON)
 - **Important**: Node Exporter URLs must use `http://`, not `https://`.
   Node Exporter serves plain HTTP by default.
 
@@ -328,18 +328,22 @@ volume. Do not commit `config.toml` to version control (it is in
 | GET    | `/api/v1/status/:hostname` | Single machine metrics                |
 | GET    | `/healthz`                 | Health check (returns 200 if running) |
 
-## Alerting
+## Heartbeat
 
-The Go backend sends push notifications via [ntfy.sh](https://ntfy.sh) for
-critical events. Configure alert rules and per-machine criticality in
-`config.toml`.
+The collector does not send alerts. It reports state on `/api/v1/status`;
+deciding what is worth a notification is the job of whatever reads that.
 
-Machines marked `critical = false` (e.g., laptops, desktops) will not trigger
-offline alerts but will still trigger hardware/service alerts (SMART failures,
-OOM kills, failed systemd units).
+What it does send is a heartbeat: with `[heartbeat] url` set, it requests
+that URL after every poll cycle in which at least one target answered. Point
+it at a dead-man's-switch service such as healthchecks.io, which then alerts
+when the pings stop -- that is, when the collector, its host or its network
+is down. A cycle that reaches no target at all sends no ping.
 
-Alert cooldown prevents notification spam: the same (host, event) pair will not
-fire again within the configured cooldown period (default: 15 minutes).
+The ping URL is a credential: anyone who has it can keep the check green.
+It is never written to the log.
+
+Each machine's `critical` flag from `config.toml` is passed through in the
+status JSON so consumers can tell always-on servers from laptops.
 
 ## Architecture
 

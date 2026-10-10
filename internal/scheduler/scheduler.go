@@ -7,11 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/ole/dashboard-api/internal/alerter"
 	"github.com/ole/dashboard-api/internal/collector"
 	"github.com/ole/dashboard-api/internal/config"
+	"github.com/ole/dashboard-api/internal/heartbeat"
 )
 
 // MachineStatus represents the online/offline state.
@@ -25,10 +26,11 @@ const (
 
 // MachineState holds the current state for one NixOS machine.
 type MachineState struct {
-	Type     string                   `json:"type"`
-	Status   MachineStatus            `json:"status"`
-	LastSeen time.Time                `json:"last_seen"`
-	Metrics  *collector.NixOSMetrics  `json:"metrics,omitempty"`
+	Type     string                  `json:"type"`
+	Critical bool                    `json:"critical"`
+	Status   MachineStatus           `json:"status"`
+	LastSeen time.Time               `json:"last_seen"`
+	Metrics  *collector.NixOSMetrics `json:"metrics,omitempty"`
 }
 
 // IncusState holds the current state for Incus.
@@ -47,7 +49,7 @@ type Snapshot struct {
 // Scheduler periodically polls all targets and maintains in-memory state.
 type Scheduler struct {
 	cfg         *config.Config
-	alerter     *alerter.Alerter
+	heartbeat   *heartbeat.Pinger
 	logger      *slog.Logger
 	httpClient  *http.Client
 	incusClient *http.Client
@@ -61,24 +63,22 @@ type Scheduler struct {
 }
 
 type machineTracker struct {
-	cfg            config.NixOSConfig
-	state          *MachineState
-	failCount      int
-	previousOOMKills int64
+	cfg       config.NixOSConfig
+	state     *MachineState
+	failCount int
 }
 
 type incusTracker struct {
-	state            *IncusState
-	failCount        int
-	previousOOMKills map[string]int64 // per-instance OOM kill tracking
+	state     *IncusState
+	failCount int
 }
 
 // New creates a scheduler from the given config.
-func New(cfg *config.Config, alert *alerter.Alerter, logger *slog.Logger) (*Scheduler, error) {
+func New(cfg *config.Config, hb *heartbeat.Pinger, logger *slog.Logger) (*Scheduler, error) {
 	s := &Scheduler{
-		cfg:     cfg,
-		alerter: alert,
-		logger:  logger,
+		cfg:       cfg,
+		heartbeat: hb,
+		logger:    logger,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -91,8 +91,9 @@ func New(cfg *config.Config, alert *alerter.Alerter, logger *slog.Logger) (*Sche
 		s.machines[n.Hostname] = &machineTracker{
 			cfg: n,
 			state: &MachineState{
-				Type:   "nixos",
-				Status: StatusOffline,
+				Type:     "nixos",
+				Critical: n.Critical,
+				Status:   StatusOffline,
 			},
 		}
 	}
@@ -108,7 +109,6 @@ func New(cfg *config.Config, alert *alerter.Alerter, logger *slog.Logger) (*Sche
 			state: &IncusState{
 				Status: StatusOffline,
 			},
-			previousOOMKills: make(map[string]int64),
 		}
 	}
 
@@ -171,6 +171,7 @@ func (s *Scheduler) GetMachineState(hostname string) *MachineState {
 
 func (s *Scheduler) pollAll(ctx context.Context) {
 	var wg sync.WaitGroup
+	var reached atomic.Int32
 
 	// Poll NixOS machines.
 	for _, t := range s.machines {
@@ -179,7 +180,9 @@ func (s *Scheduler) pollAll(ctx context.Context) {
 			defer wg.Done()
 			s.sem <- struct{}{}        // acquire
 			defer func() { <-s.sem }() // release
-			s.pollNixOS(ctx, tracker)
+			if s.pollNixOS(ctx, tracker) {
+				reached.Add(1)
+			}
 		}(t)
 	}
 
@@ -190,15 +193,24 @@ func (s *Scheduler) pollAll(ctx context.Context) {
 			defer wg.Done()
 			s.sem <- struct{}{}
 			defer func() { <-s.sem }()
-			s.pollIncus(ctx)
+			if s.pollIncus(ctx) {
+				reached.Add(1)
+			}
 		}()
 	}
 
 	wg.Wait()
-	s.logger.Info("poll cycle complete")
+	s.logger.Info("poll cycle complete", "reached", reached.Load())
+
+	// A cycle that reached nothing is not a sign of life: stay silent and
+	// let the dead-man's switch fire.
+	if reached.Load() > 0 && ctx.Err() == nil {
+		s.heartbeat.Ping(ctx)
+	}
 }
 
-func (s *Scheduler) pollNixOS(ctx context.Context, t *machineTracker) {
+// pollNixOS scrapes one machine and reports whether it answered.
+func (s *Scheduler) pollNixOS(ctx context.Context, t *machineTracker) bool {
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -218,95 +230,25 @@ func (s *Scheduler) pollNixOS(ctx context.Context, t *machineTracker) {
 			"fail_count", t.failCount,
 		)
 
-		oldStatus := t.state.Status
 		switch {
 		case t.failCount >= 3:
 			t.state.Status = StatusOffline
 		default:
 			t.state.Status = StatusUnreachable
 		}
-
-		// Alert on transition to offline for critical machines.
-		if oldStatus != StatusOffline && t.state.Status == StatusOffline && t.cfg.Critical {
-			s.alerter.Send(ctx, t.cfg.Hostname, alerter.EventMachineOffline,
-				fmt.Sprintf("%s is offline", t.cfg.Hostname),
-				fmt.Sprintf("Machine %s has been unreachable for %d consecutive polls.", t.cfg.Hostname, t.failCount),
-			)
-		}
-		return
+		return false
 	}
 
 	// Success.
 	t.failCount = 0
 	t.state.Status = StatusOnline
 	t.state.LastSeen = time.Now()
-
-	// Check alert conditions before updating metrics.
-	s.checkAlerts(ctx, t, metrics)
-
 	t.state.Metrics = metrics
+	return true
 }
 
-func (s *Scheduler) checkAlerts(ctx context.Context, t *machineTracker, m *collector.NixOSMetrics) {
-	rules := s.cfg.Alerting.Rules
-	hostname := t.cfg.Hostname
-
-	// SMART failure (all machines).
-	if rules.SMARTFailure && !m.SMARTHealthy {
-		var failingDisks []string
-		for disk, healthy := range m.SMARTDisks {
-			if !healthy {
-				failingDisks = append(failingDisks, disk)
-			}
-		}
-		detail := fmt.Sprintf("One or more disks on %s are reporting SMART failures.", hostname)
-		if len(failingDisks) > 0 {
-			detail = fmt.Sprintf("SMART failures on %s: %v", hostname, failingDisks)
-		}
-		s.alerter.Send(ctx, hostname, alerter.EventSMARTFailure,
-			fmt.Sprintf("SMART failure on %s", hostname),
-			detail,
-		)
-	}
-
-	// OOM kills (all machines, delta-based).
-	if rules.OOMKill && m.OOMKills > t.previousOOMKills && t.previousOOMKills > 0 {
-		s.alerter.Send(ctx, hostname, alerter.EventOOMKill,
-			fmt.Sprintf("OOM kill on %s", hostname),
-			fmt.Sprintf("OOM kills increased from %d to %d on %s.", t.previousOOMKills, m.OOMKills, hostname),
-		)
-	}
-	t.previousOOMKills = m.OOMKills
-
-	// High disk usage (all machines).
-	if rules.HighDiskUsagePercent > 0 && m.DiskUsedPercent >= float64(rules.HighDiskUsagePercent) {
-		s.alerter.Send(ctx, hostname, alerter.EventHighDisk,
-			fmt.Sprintf("High disk on %s (%.0f%%)", hostname, m.DiskUsedPercent),
-			fmt.Sprintf("Disk usage on %s is at %.1f%%.", hostname, m.DiskUsedPercent),
-		)
-	}
-
-	// Failed systemd services (all machines).
-	if rules.FailedServices && len(m.FailedServices) > 0 {
-		s.alerter.Send(ctx, hostname, alerter.EventFailedServices,
-			fmt.Sprintf("Failed services on %s", hostname),
-			fmt.Sprintf("Failed units: %v", m.FailedServices),
-		)
-	}
-
-	// Stale Borg backups (all machines).
-	if rules.BorgStaleHours > 0 && m.BorgLastBackup != nil {
-		age := time.Since(time.Unix(int64(*m.BorgLastBackup), 0))
-		if age > time.Duration(rules.BorgStaleHours)*time.Hour {
-			s.alerter.Send(ctx, hostname, alerter.EventBorgStale,
-				fmt.Sprintf("Stale backup on %s", hostname),
-				fmt.Sprintf("Last Borg backup on %s was %.0f hours ago.", hostname, age.Hours()),
-			)
-		}
-	}
-}
-
-func (s *Scheduler) pollIncus(ctx context.Context) {
+// pollIncus scrapes the Incus metrics endpoint and reports whether it answered.
+func (s *Scheduler) pollIncus(ctx context.Context) bool {
 	pollCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -327,26 +269,12 @@ func (s *Scheduler) pollIncus(ctx context.Context) {
 		default:
 			s.incus.state.Status = StatusUnreachable
 		}
-		return
+		return false
 	}
 
 	s.incus.failCount = 0
 	s.incus.state.Status = StatusOnline
 	s.incus.state.LastSeen = time.Now()
-
-	// Check for OOM kills on Incus instances (delta-based, same as NixOS).
-	if metrics != nil && s.cfg.Alerting.Rules.OOMKill {
-		for name, inst := range metrics.Instances {
-			prev, hasPrev := s.incus.previousOOMKills[name]
-			if hasPrev && inst.OOMKills > prev {
-				s.alerter.Send(ctx, "incus/"+name, alerter.EventOOMKill,
-					fmt.Sprintf("OOM kill in Incus instance %s", name),
-					fmt.Sprintf("OOM kills increased from %d to %d in Incus instance %s.", prev, inst.OOMKills, name),
-				)
-			}
-			s.incus.previousOOMKills[name] = inst.OOMKills
-		}
-	}
-
 	s.incus.state.Metrics = metrics
+	return true
 }

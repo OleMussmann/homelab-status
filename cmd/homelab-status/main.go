@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ole/dashboard-api/internal/alerter"
 	"github.com/ole/dashboard-api/internal/config"
+	"github.com/ole/dashboard-api/internal/heartbeat"
 	"github.com/ole/dashboard-api/internal/scheduler"
 	"github.com/ole/dashboard-api/internal/server"
 )
@@ -83,20 +83,11 @@ func run(configPath string, logger *slog.Logger) error {
 		"listen", cfg.Server.Listen,
 		"nixos_machines", len(cfg.NixOS),
 		"incus_configured", cfg.Incus.URL != "",
-		"alerting_enabled", cfg.Alerting.Enabled,
+		"heartbeat_configured", cfg.Heartbeat.URL != "",
 	)
 
-	// Set up alerter.
-	var alert *alerter.Alerter
-	if cfg.Alerting.Enabled {
-		alert = alerter.New(cfg.Alerting.NtfyURL, cfg.Alerting.CooldownMinutes, logger)
-		logger.Info("alerting enabled", "ntfy_url", cfg.Alerting.NtfyURL)
-	} else {
-		alert = alerter.New("", 0, logger) // disabled no-op alerter
-	}
-
 	// Set up scheduler.
-	sched, err := scheduler.New(cfg, alert, logger)
+	sched, err := scheduler.New(cfg, heartbeat.New(cfg.Heartbeat.URL, logger), logger)
 	if err != nil {
 		return fmt.Errorf("create scheduler: %w", err)
 	}
