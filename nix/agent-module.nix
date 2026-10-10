@@ -202,18 +202,21 @@ in
               echo "# HELP node_borg_last_backup_timestamp_seconds Unix timestamp of last successful Borg backup" > "$OUTPUT.tmp"
               echo "# TYPE node_borg_last_backup_timestamp_seconds gauge" >> "$OUTPUT.tmp"
 
-              # Find the history file (could be Flatpak or Native)
+              # Find the config dir (could be Flatpak or Native)
               HOME_DIR=$(${pkgs.getent}/bin/getent passwd "${user}" | ${pkgs.coreutils}/bin/cut -d: -f6)
-              FLATPAK_FILE="$HOME_DIR/.var/app/org.gnome.World.PikaBackup/config/pika-backup/history.json"
-              NATIVE_FILE="$HOME_DIR/.config/pika-backup/history.json"
+              FLATPAK_DIR="$HOME_DIR/.var/app/org.gnome.World.PikaBackup/config/pika-backup"
+              NATIVE_DIR="$HOME_DIR/.config/pika-backup"
 
-              FILE=""
-              if [ -f "$FLATPAK_FILE" ]; then FILE="$FLATPAK_FILE"; fi
-              if [ -f "$NATIVE_FILE" ]; then FILE="$NATIVE_FILE"; fi
+              DIR=""
+              if [ -f "$FLATPAK_DIR/history.json" ]; then DIR="$FLATPAK_DIR"; fi
+              if [ -f "$NATIVE_DIR/history.json" ]; then DIR="$NATIVE_DIR"; fi
 
-              if [ -n "$FILE" ]; then
-                for id in $(${pkgs.jq}/bin/jq -r 'keys[]' "$FILE" 2>/dev/null || echo ""); do
-                  ts_iso=$(${pkgs.jq}/bin/jq -r ".\"$id\".last_completed.end // empty" "$FILE" 2>/dev/null || echo "")
+              # Iterate the configured backups (backup.json), not history.json:
+              # Pika keeps history entries for deleted configs, and the
+              # collector reports the oldest timestamp per host.
+              if [ -n "$DIR" ] && [ -f "$DIR/backup.json" ]; then
+                for id in $(${pkgs.jq}/bin/jq -r '.[].id' "$DIR/backup.json" 2>/dev/null || echo ""); do
+                  ts_iso=$(${pkgs.jq}/bin/jq -r ".\"$id\".last_completed.end // empty" "$DIR/history.json" 2>/dev/null || echo "")
                   if [ -n "$ts_iso" ]; then
                     ts_epoch=$(${pkgs.coreutils}/bin/date -d "$ts_iso" +%s 2>/dev/null || echo "0")
                     echo "node_borg_last_backup_timestamp_seconds{job=\"pika-${user}-$id\"} $ts_epoch" >> "$OUTPUT.tmp"
