@@ -60,6 +60,9 @@ type NixOSConfig struct {
 	password string
 }
 
+// DefaultListen is the listen address used when [server] listen is unset.
+const DefaultListen = "0.0.0.0:8080"
+
 // Load reads and parses a TOML config file, applies defaults, and validates.
 func Load(path string) (*Config, error) {
 	var cfg Config
@@ -69,7 +72,7 @@ func Load(path string) (*Config, error) {
 
 	// Apply defaults.
 	if cfg.Server.Listen == "" {
-		cfg.Server.Listen = "0.0.0.0:8080"
+		cfg.Server.Listen = DefaultListen
 	}
 	if cfg.Server.PollIntervalMinutes <= 0 {
 		cfg.Server.PollIntervalMinutes = 5
@@ -94,6 +97,22 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// ListenAddr returns only the [server] listen address from the config file,
+// with the default applied. Unlike Load it neither validates nor reads
+// password files, so a health probe does not fail on an unrelated secret.
+func ListenAddr(path string) (string, error) {
+	var cfg struct {
+		Server ServerConfig `toml:"server"`
+	}
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return "", fmt.Errorf("decode config %s: %w", path, err)
+	}
+	if cfg.Server.Listen == "" {
+		return DefaultListen, nil
+	}
+	return cfg.Server.Listen, nil
 }
 
 // Password returns the resolved password for a NixOS machine.

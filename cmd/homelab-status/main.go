@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,7 +21,18 @@ import (
 
 func main() {
 	configPath := flag.String("config", "/config/config.toml", "path to TOML config file")
+	healthcheck := flag.Bool("healthcheck", false, "probe /healthz of the running server and exit 0 if healthy, 1 if not")
 	flag.Parse()
+
+	// The runtime image is distroless (no shell, no wget), so the container
+	// healthcheck has to be this binary.
+	if *healthcheck {
+		if err := probe(*configPath); err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
@@ -30,6 +42,36 @@ func main() {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// probe checks that the server answers GET /healthz with 200. It is liveness
+// only: stale metrics are not a reason to restart the collector.
+func probe(configPath string) error {
+	listen, err := config.ListenAddr(configPath)
+	if err != nil {
+		return err
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("listen address %q: %w", listen, err)
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("/healthz returned %s", resp.Status)
+	}
+	return nil
 }
 
 func run(configPath string, logger *slog.Logger) error {
