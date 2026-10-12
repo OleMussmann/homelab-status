@@ -30,6 +30,8 @@ type NixOSMetrics struct {
 	Temperatures     map[string]float64 `json:"temperatures"`
 	BorgLastBackup      *float64 `json:"borg_last_backup,omitempty"`
 	BorgLastBackupHours *float64 `json:"borg_last_backup_hours,omitempty"`
+	IncusExportLast      *float64 `json:"incus_export_last,omitempty"`
+	IncusExportLastHours *float64 `json:"incus_export_last_hours,omitempty"`
 }
 
 // ScrapeNodeExporter fetches and parses metrics from a Prometheus Node Exporter endpoint.
@@ -86,6 +88,12 @@ func parseNodeExporterMetrics(r io.Reader, contentType string) (*NixOSMetrics, e
 		hours := time.Since(time.Unix(int64(*m.BorgLastBackup), 0)).Hours()
 		h := math.Round(hours*10) / 10
 		m.BorgLastBackupHours = &h
+	}
+	m.IncusExportLast = calcIncusExportLast(families)
+	if m.IncusExportLast != nil {
+		hours := time.Since(time.Unix(int64(*m.IncusExportLast), 0)).Hours()
+		h := math.Round(hours*10) / 10
+		m.IncusExportLastHours = &h
 	}
 
 	return m, nil
@@ -282,6 +290,33 @@ func calcFailedServices(families map[string]*dto.MetricFamily) []string {
 	}
 
 	return failed
+}
+
+// calcIncusExportLast returns the time of the newest Incus volume export on
+// a host that pulls them, or nil if the host exports no such series.
+func calcIncusExportLast(families map[string]*dto.MetricFamily) *float64 {
+	// textfile metric: node_incus_export_last_timestamp_seconds
+	fam, ok := families["node_incus_export_last_timestamp_seconds"]
+	if !ok {
+		return nil
+	}
+	var newest float64
+	for _, metric := range fam.GetMetric() {
+		var val float64
+		if g := metric.GetGauge(); g != nil {
+			val = g.GetValue()
+		} else if u := metric.GetUntyped(); u != nil {
+			val = u.GetValue()
+		}
+		if val > newest {
+			newest = val
+		}
+	}
+	// 0 means the host has never produced an export.
+	if newest <= 0 {
+		return nil
+	}
+	return &newest
 }
 
 func calcRebootRequired(families map[string]*dto.MetricFamily) bool {
