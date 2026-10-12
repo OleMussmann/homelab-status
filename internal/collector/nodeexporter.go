@@ -249,25 +249,38 @@ func calcSMARTHealth(families map[string]*dto.MetricFamily) smartResult {
 	}
 }
 
+// calcFailedServices lists units that are in the failed state or whose last
+// run exited with an error. The second source exists because the failed state
+// does not last: `switch-to-configuration` resets it, the exit status of the
+// last run stays until the unit runs again.
 func calcFailedServices(families map[string]*dto.MetricFamily) []string {
-	// systemd collector: node_systemd_unit_state{name="...",state="failed"} 1
-	fam, ok := families["node_systemd_unit_state"]
-	if !ok {
-		return []string{}
+	failed := []string{}
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			failed = append(failed, name)
+		}
 	}
-	var failed []string
-	for _, m := range fam.GetMetric() {
-		state := labelValue(m, "state")
-		if state == "failed" && m.GetGauge() != nil && m.GetGauge().GetValue() == 1 {
-			name := labelValue(m, "name")
-			if name != "" {
-				failed = append(failed, name)
+
+	// systemd collector: node_systemd_unit_state{name="...",state="failed"} 1
+	if fam, ok := families["node_systemd_unit_state"]; ok {
+		for _, m := range fam.GetMetric() {
+			if labelValue(m, "state") == "failed" && m.GetGauge() != nil && m.GetGauge().GetValue() == 1 {
+				add(labelValue(m, "name"))
 			}
 		}
 	}
-	if failed == nil {
-		return []string{}
+
+	// textfile metric: node_systemd_unit_last_run_failed{name="..."} <exit status>
+	if fam, ok := families["node_systemd_unit_last_run_failed"]; ok {
+		for _, m := range fam.GetMetric() {
+			if m.GetGauge() != nil && m.GetGauge().GetValue() != 0 {
+				add(labelValue(m, "name"))
+			}
+		}
 	}
+
 	return failed
 }
 

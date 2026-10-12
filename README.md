@@ -149,8 +149,15 @@ Then import the agent module on each machine you want to monitor:
 ```
 
 This enables `prometheus-node-exporter` with Basic Auth, the `systemd`
-collector, and textfile scripts for SMART, Borg, NixOS generation, and reboot
-detection.
+collector, and textfile scripts for SMART, Borg, NixOS generation, reboot
+detection, and oneshot services whose last run exited with an error.
+
+`failed_services` in the status JSON is the union of two sources: units in
+the systemd `failed` state, and oneshot services whose last run exited
+non-zero. The second one is needed because `switch-to-configuration` resets
+the `failed` state, so a failed timer job would otherwise look healthy after
+the next (automatic) switch. It stays listed until the unit runs again
+successfully or the host reboots.
 
 Apply on each machine:
 

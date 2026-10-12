@@ -159,6 +159,63 @@ in
           OnUnitActiveSec = "5min";
         };
       };
+
+      # Oneshot services whose last run exited with an error.
+      #
+      # node-exporter's systemd collector only reports the `failed` unit
+      # state, and `switch-to-configuration` resets that state, so on a host
+      # with a nightly auto-upgrade a failed timer job looks healthy again
+      # after the next switch. The exit status of the last main process is
+      # kept until the unit runs again, so it is reported here as well.
+      #
+      # Only Type=oneshot, only a plain non-zero exit: long-running services
+      # routinely end with a signal or an odd status when stopped, which
+      # says nothing about failure. Codes the unit itself declares fine
+      # (SuccessExitStatus=) are honoured.
+      systemd.services.homelab-status-unit-exits = {
+        description = "Dump failed last runs of oneshot services to node-exporter textfile";
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = pkgs.writeShellScript "unit-exits" ''
+            set -euo pipefail
+            OUTPUT="${cfg.textfileDir}/unit_exits.prom"
+            {
+              echo "# HELP node_systemd_unit_last_run_failed Oneshot service whose last run exited with this non-zero status"
+              echo "# TYPE node_systemd_unit_last_run_failed gauge"
+              ${config.systemd.package}/bin/systemctl show --type=service --all \
+                -p Id,Type,ActiveState,ExecMainCode,ExecMainStatus,SuccessExitStatus \
+                | ${pkgs.gawk}/bin/awk '
+                    BEGIN { RS = ""; FS = "\n" }
+                    {
+                      delete p
+                      for (i = 1; i <= NF; i++) {
+                        eq = index($i, "=")
+                        if (eq) p[substr($i, 1, eq - 1)] = substr($i, eq + 1)
+                      }
+                      if (p["Type"] != "oneshot") next
+                      if (p["ActiveState"] != "inactive" && p["ActiveState"] != "failed") next
+                      # ExecMainCode 1 is CLD_EXITED; signals are left out.
+                      if (p["ExecMainCode"] != 1 || p["ExecMainStatus"] == 0) next
+                      n = split(p["SuccessExitStatus"], ok, " ")
+                      for (i = 1; i <= n; i++) if (ok[i] == p["ExecMainStatus"]) next
+                      name = p["Id"]
+                      gsub(/\\/, "\\\\", name)
+                      gsub(/"/, "\\\"", name)
+                      printf "node_systemd_unit_last_run_failed{name=\"%s\"} %d\n", name, p["ExecMainStatus"]
+                    }'
+            } > "$OUTPUT.tmp"
+            mv "$OUTPUT.tmp" "$OUTPUT"
+          '';
+        };
+      };
+
+      systemd.timers.homelab-status-unit-exits = {
+        wantedBy = [ "timers.target" ];
+        timerConfig = {
+          OnBootSec = "1min";
+          OnUnitActiveSec = "5min";
+        };
+      };
     }
 
     # Borg backup status textfile scripts (one per configured job).
