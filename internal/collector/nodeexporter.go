@@ -27,6 +27,7 @@ type NixOSMetrics struct {
 	OOMKills         int64             `json:"oom_kills"`
 	RebootRequired   bool              `json:"reboot_required"`
 	NixOSGeneration  int64             `json:"nixos_generation"`
+	NixOSRevision    string            `json:"nixos_revision,omitempty"`
 	Temperatures     map[string]float64 `json:"temperatures"`
 	BorgLastBackup      *float64 `json:"borg_last_backup,omitempty"`
 	BorgLastBackupHours *float64 `json:"borg_last_backup_hours,omitempty"`
@@ -82,6 +83,7 @@ func parseNodeExporterMetrics(r io.Reader, contentType string) (*NixOSMetrics, e
 	m.OOMKills = int64(gaugeValue(families, "node_vmstat_oom_kill"))
 	m.RebootRequired = calcRebootRequired(families)
 	m.NixOSGeneration = int64(gaugeValue(families, "node_nixos_generation"))
+	m.NixOSRevision = calcNixOSRevision(families)
 	m.Temperatures = calcTemperatures(families)
 	m.BorgLastBackup = calcBorgLastBackup(families)
 	if m.BorgLastBackup != nil {
@@ -317,6 +319,22 @@ func calcIncusExportLast(families map[string]*dto.MetricFamily) *float64 {
 		return nil
 	}
 	return &newest
+}
+
+// calcNixOSRevision returns the flake commit the running system was built
+// from, or "" if the host does not report one.
+func calcNixOSRevision(families map[string]*dto.MetricFamily) string {
+	// textfile metric: node_nixos_configuration_revision{revision="<sha>"} 1
+	fam, ok := families["node_nixos_configuration_revision"]
+	if !ok {
+		return ""
+	}
+	for _, m := range fam.GetMetric() {
+		if rev := labelValue(m, "revision"); rev != "" {
+			return rev
+		}
+	}
+	return ""
 }
 
 func calcRebootRequired(families map[string]*dto.MetricFamily) bool {

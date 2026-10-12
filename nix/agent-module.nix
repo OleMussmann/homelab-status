@@ -147,6 +147,16 @@ in
             else
               echo "node_reboot_required 0" >> "$OUTPUT.tmp"
             fi
+
+            # The flake commit the running system was built from, to tell
+            # "nothing to deploy" from "stopped deploying". Empty when the
+            # system was built from a dirty tree or sets no revision.
+            echo "# HELP node_nixos_configuration_revision Configuration revision of the running system" >> "$OUTPUT.tmp"
+            echo "# TYPE node_nixos_configuration_revision gauge" >> "$OUTPUT.tmp"
+            rev=$(/run/current-system/sw/bin/nixos-version --configuration-revision 2>/dev/null || true)
+            if echo "$rev" | ${pkgs.gnugrep}/bin/grep -qE '^[0-9a-f]{40}$'; then
+              echo "node_nixos_configuration_revision{revision=\"$rev\"} 1" >> "$OUTPUT.tmp"
+            fi
             mv "$OUTPUT.tmp" "$OUTPUT"
           '';
         };

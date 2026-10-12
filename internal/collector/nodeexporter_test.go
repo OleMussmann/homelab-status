@@ -117,3 +117,25 @@ func TestIncusExportLast(t *testing.T) {
 		}
 	})
 }
+
+func TestNixOSRevision(t *testing.T) {
+	parse := func(text string) string {
+		t.Helper()
+		m, err := parseNodeExporterMetrics(strings.NewReader(text), "")
+		if err != nil {
+			t.Fatalf("parseNodeExporterMetrics failed: %v", err)
+		}
+		return m.NixOSRevision
+	}
+	const rev = "e4d6944defdab8dfa04cc04fdbfdac58a3eed6f1"
+	if got := parse("# TYPE node_nixos_configuration_revision gauge\nnode_nixos_configuration_revision{revision=\"" + rev + "\"} 1\n"); got != rev {
+		t.Errorf("NixOSRevision = %q, want %q", got, rev)
+	}
+	// A dirty build exports the family without a sample.
+	if got := parse("# TYPE node_nixos_configuration_revision gauge\nnode_load1 0.5\n"); got != "" {
+		t.Errorf("NixOSRevision = %q, want empty", got)
+	}
+	if got := parse("node_load1 0.5\n"); got != "" {
+		t.Errorf("NixOSRevision = %q, want empty", got)
+	}
+}
