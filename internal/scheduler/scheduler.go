@@ -13,6 +13,7 @@ import (
 	"github.com/ole/dashboard-api/internal/collector"
 	"github.com/ole/dashboard-api/internal/config"
 	"github.com/ole/dashboard-api/internal/heartbeat"
+	"github.com/ole/dashboard-api/internal/upstream"
 )
 
 // MachineStatus represents the online/offline state.
@@ -31,6 +32,17 @@ type MachineState struct {
 	Status   MachineStatus           `json:"status"`
 	LastSeen time.Time               `json:"last_seen"`
 	Metrics  *collector.NixOSMetrics `json:"metrics,omitempty"`
+	// CommitsBehind is how many upstream commits the running configuration
+	// lacks. Absent when it is not known: no upstream configured or
+	// reachable, machine offline, or a revision upstream has never seen.
+	CommitsBehind *int `json:"commits_behind,omitempty"`
+}
+
+// UpstreamState holds what is known about the branch the machines deploy from.
+type UpstreamState struct {
+	Status   MachineStatus `json:"status"`
+	LastSeen time.Time     `json:"last_seen"`
+	Revision string        `json:"revision,omitempty"`
 }
 
 // IncusState holds the current state for Incus.
@@ -44,6 +56,7 @@ type IncusState struct {
 type Snapshot struct {
 	Machines map[string]*MachineState `json:"machines"`
 	Incus    *IncusState              `json:"incus,omitempty"`
+	Upstream *UpstreamState           `json:"upstream,omitempty"`
 }
 
 // Scheduler periodically polls all targets and maintains in-memory state.
@@ -57,6 +70,15 @@ type Scheduler struct {
 	mu       sync.RWMutex
 	machines map[string]*machineTracker
 	incus    *incusTracker
+
+	// Upstream comparison. upstreamState is guarded by mu; the cache is
+	// only touched by the poll loop. It maps a machine revision to its
+	// commit gap and is valid for one upstream head.
+	upstream          *upstream.Client
+	upstreamState     *UpstreamState
+	upstreamFailCount int
+	behindHead        string
+	behindCache       map[string]int
 
 	// semaphore limits concurrent polls.
 	sem chan struct{}
@@ -84,6 +106,11 @@ func New(cfg *config.Config, hb *heartbeat.Pinger, logger *slog.Logger) (*Schedu
 		},
 		machines: make(map[string]*machineTracker),
 		sem:      make(chan struct{}, 5),
+	}
+
+	s.upstream = upstream.New(cfg.Upstream.GitLabURL, cfg.Upstream.Project, cfg.Upstream.Branch, cfg.Upstream.Token())
+	if s.upstream != nil {
+		s.upstreamState = &UpstreamState{Status: StatusOffline}
 	}
 
 	// Initialize machine trackers.
@@ -153,6 +180,10 @@ func (s *Scheduler) GetSnapshot() *Snapshot {
 		state := *s.incus.state
 		snap.Incus = &state
 	}
+	if s.upstreamState != nil {
+		state := *s.upstreamState
+		snap.Upstream = &state
+	}
 	return snap
 }
 
@@ -200,6 +231,8 @@ func (s *Scheduler) pollAll(ctx context.Context) {
 	}
 
 	wg.Wait()
+	// After the machines: the comparison needs the revisions just scraped.
+	s.pollUpstream(ctx)
 	s.logger.Info("poll cycle complete", "reached", reached.Load())
 
 	// A cycle that reached nothing is not a sign of life: stay silent and
@@ -245,6 +278,76 @@ func (s *Scheduler) pollNixOS(ctx context.Context, t *machineTracker) bool {
 	t.state.LastSeen = time.Now()
 	t.state.Metrics = metrics
 	return true
+}
+
+// pollUpstream asks upstream for its head and works out how far behind each
+// online machine is. It is not a monitored target: reaching it does not count
+// towards the heartbeat.
+func (s *Scheduler) pollUpstream(ctx context.Context) {
+	if s.upstream == nil {
+		return
+	}
+	pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	s.mu.RLock()
+	revs := make(map[string]string, len(s.machines))
+	for name, t := range s.machines {
+		if t.state.Status == StatusOnline && t.state.Metrics != nil && t.state.Metrics.NixOSRevision != "" {
+			revs[name] = t.state.Metrics.NixOSRevision
+		}
+	}
+	s.mu.RUnlock()
+
+	head, err := s.upstream.Head(pollCtx)
+	if err == nil {
+		if head != s.behindHead {
+			s.behindHead = head
+			s.behindCache = make(map[string]int)
+		}
+		for name, rev := range revs {
+			if _, ok := s.behindCache[rev]; ok {
+				continue
+			}
+			if rev == head {
+				s.behindCache[rev] = 0
+				continue
+			}
+			n, berr := s.upstream.Behind(pollCtx, rev)
+			if berr != nil {
+				s.logger.Warn("upstream compare failed", "hostname", name, "revision", rev, "error", berr)
+				continue
+			}
+			s.behindCache[rev] = n
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, t := range s.machines {
+		t.state.CommitsBehind = nil
+	}
+	if err != nil {
+		s.upstreamFailCount++
+		s.logger.Warn("upstream poll failed", "error", err, "fail_count", s.upstreamFailCount)
+		if s.upstreamFailCount >= 3 {
+			s.upstreamState.Status = StatusOffline
+		} else {
+			s.upstreamState.Status = StatusUnreachable
+		}
+		return
+	}
+	s.upstreamFailCount = 0
+	s.upstreamState.Status = StatusOnline
+	s.upstreamState.LastSeen = time.Now()
+	s.upstreamState.Revision = head
+	for name, rev := range revs {
+		if n, ok := s.behindCache[rev]; ok {
+			behind := n
+			s.machines[name].state.CommitsBehind = &behind
+		}
+	}
 }
 
 // pollIncus scrapes the Incus metrics endpoint and reports whether it answered.

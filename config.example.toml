@@ -17,6 +17,17 @@ key_file = "/secrets/metrics.key"
 # [heartbeat]
 # url = "https://hc-ping.com/your-check-uuid"
 
+# Optional: the GitLab project and branch the NixOS machines deploy from.
+# With it, each machine gets `commits_behind` in the status JSON, and the
+# status has an `upstream` section. The token needs read access to the
+# repository (project access token, scope read_repository); leave token_file
+# out for a public project.
+# [upstream]
+# project = "group/nixos"
+# branch = "main"                           # default
+# gitlab_url = "https://gitlab.com"         # default
+# token_file = "/run/secrets/gitlab-token"
+
 # Add one [[nixos]] block per monitored NixOS machine.
 # `critical` is passed through in the status JSON: true for always-on
 # machines, false for laptops and desktops that are expected to be offline.

@@ -14,6 +14,7 @@ type Config struct {
 	Server    ServerConfig    `toml:"server"`
 	Incus     IncusConfig     `toml:"incus"`
 	Heartbeat HeartbeatConfig `toml:"heartbeat"`
+	Upstream  UpstreamConfig  `toml:"upstream"`
 	NixOS     []NixOSConfig   `toml:"nixos"`
 }
 
@@ -35,6 +36,24 @@ type IncusConfig struct {
 // The URL is a credential: whoever has it can ping the check.
 type HeartbeatConfig struct {
 	URL string `toml:"url"`
+}
+
+// UpstreamConfig names the GitLab project and branch the NixOS machines are
+// deployed from. With it the status says how many commits each machine is
+// behind. Unset Project disables the comparison.
+type UpstreamConfig struct {
+	GitLabURL string `toml:"gitlab_url"`
+	Project   string `toml:"project"`
+	Branch    string `toml:"branch"`
+	TokenFile string `toml:"token_file"`
+
+	// token is the resolved value read from TokenFile at load time.
+	token string
+}
+
+// Token returns the resolved access token, empty for a public project.
+func (u *UpstreamConfig) Token() string {
+	return u.token
 }
 
 // NixOSConfig describes a single monitored NixOS machine.
@@ -67,6 +86,13 @@ func Load(path string) (*Config, error) {
 		cfg.Server.PollIntervalMinutes = 5
 	}
 
+	if cfg.Upstream.GitLabURL == "" {
+		cfg.Upstream.GitLabURL = "https://gitlab.com"
+	}
+	if cfg.Upstream.Branch == "" {
+		cfg.Upstream.Branch = "main"
+	}
+
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
 	}
@@ -80,6 +106,14 @@ func Load(path string) (*Config, error) {
 			}
 			cfg.NixOS[i].password = pw
 		}
+	}
+
+	if cfg.Upstream.Project != "" && cfg.Upstream.TokenFile != "" {
+		token, err := readSecretFile(cfg.Upstream.TokenFile)
+		if err != nil {
+			return nil, fmt.Errorf("upstream token: %w", err)
+		}
+		cfg.Upstream.token = token
 	}
 
 	return &cfg, nil
@@ -120,6 +154,9 @@ func (c *Config) validate() error {
 	}
 	if u := c.Heartbeat.URL; u != "" && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
 		return fmt.Errorf("heartbeat.url must be an http(s) URL")
+	}
+	if u := c.Upstream.GitLabURL; c.Upstream.Project != "" && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "http://") {
+		return fmt.Errorf("upstream.gitlab_url must be an http(s) URL")
 	}
 	return nil
 }
